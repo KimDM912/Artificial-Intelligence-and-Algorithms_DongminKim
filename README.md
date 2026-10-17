@@ -1,0 +1,191 @@
+# Min-Min Scheduling for Three-Robot WAAM
+
+This submission implements deterministic, layer-wise Min-Min scheduling for
+three-robot wire arc additive manufacturing (WAAM). Every exported submission
+trajectory is generated from the supplied STL and configuration by `Min-Min.py`
+and the accompanying `common` package, then checked by the full WAAM Validator.
+No saved experimental schedules or initial solutions are loaded.
+
+## Repository layout
+
+```text
+Min-Min.py                    Min-Min task and robot selection
+common/
+  common.py                  Configuration, data structures, and CSV export
+  slicer.py                  STL slicing and feasible deposition paths
+  scheduler.py               Completion times, direct transitions, and rendering
+  temporal.py                Swept-geometry collision reservations and caches
+  metrics.py                 Makespan, computation time, utilization, and idle time
+  runner.py                  CLI, validation, provenance, and publication
+trajectory/
+  trajectory_01.csv          Created after case 01 passes validation
+  ...
+  trajectory_06.csv          Created after case 06 passes validation
+results/                     Local execution records; ignored by Git
+```
+
+The `trajectory` directory is initially empty. Existing trajectories are not
+copied from previous benchmarks. Python bytecode and local execution records
+should not be committed.
+
+## Environment
+
+Use Python 3.11 or later and install the supplied WAAM Validator project, which
+provides configuration models, STL slicing, and the full validation pipeline:
+
+```powershell
+python -m pip install -e "C:\path\to\WAAM_Validator-main"
+```
+
+Use the Validator distribution provided with the evaluation scenarios. This
+repository does not vendor or modify Validator code. An environment with only
+the standard Python library is insufficient. The development environment used
+WAAM Validator 1.0.0, Python 3.11, NumPy 2.4.6, Shapely 2.1.2, trimesh 5.0.0,
+PyYAML 6.0.3, and pydantic 2.13.4. Every run records actual package versions and
+the submitted Python source hashes. Matching dependency versions is important
+for reproducible geometry and floating-point tie handling.
+
+## Reproduce the six benchmark cases
+
+Inputs must retain the provided configuration and target geometry:
+
+```text
+<input-root>/
+  01/config.yaml
+  01/target.stl
+  ...
+  06/config.yaml
+  06/target.stl
+```
+
+From this submission directory:
+
+```powershell
+python -B .\Min-Min.py --input-root "C:\path\to\WAAM_Validator-main\tests"
+```
+
+Run one case independently:
+
+```powershell
+python -B .\Min-Min.py 4 --input-root "C:\path\to\WAAM_Validator-main\tests"
+```
+
+When this directory is located at `WAAM_Validator-main/submit`, the local project
+environment can be used directly, from the Validator project root:
+
+```powershell
+.\.venv\Scripts\python.exe -B .\submit\Min-Min.py
+.\.venv\Scripts\python.exe -B .\submit\Min-Min.py 4
+```
+
+Without `--input-root`, the runner first looks for `inputs` next to `Min-Min.py`,
+then for `tests` in its parent directory. Output paths are resolved relative to
+the submission directory, independent of the working directory. Explicit
+relative command-line paths are resolved against the working directory.
+
+## Previously unseen scenarios
+
+A new scenario requires `config.yaml` and `target.stl` in one directory:
+
+```powershell
+python -B .\Min-Min.py --input-dir "C:\path\to\new-scenario"
+```
+
+This produces `trajectory/trajectory_custom.csv` after validation. The supplied
+scenario must describe three robots with IDs 1, 2, and 3. No case-specific robot
+assignments, learned parameters, or task-count thresholds are used.
+
+## Scheduling method
+
+1. Slice the STL and construct contour-parallel deposition paths. Split paths
+   only when required by the conservative feasible-robot test.
+2. Process layers in increasing order. The next layer is released when all
+   previous-layer deposition and arc-off operations are complete.
+3. For every remaining task, evaluate each feasible robot against the committed
+   schedule. Include approach travel, arc-on, deposition, arc-off, collision
+   delays, and a provisional final home return.
+4. Select the earliest-finishing robot for each task, then commit the task with
+   the smallest resulting completion time. Recompute remaining candidates.
+5. For a robot with a predecessor, compare a safe direct connection from its
+   deposition endpoint with a home-mediated connection. Check stationary waits
+   explicitly. A committed direct connection cancels the predecessor's
+   provisional return. Retain the final home return for each robot.
+6. Render timestamped TCP waypoints and run full Validator acceptance.
+
+Robot ties use completion time, start time, then robot ID. Task ties use
+completion time, task index (ordered by layer and task ID), then robot ID.
+Route ties prefer direct connection. No random seed or hyperparameter tuning is
+required. This is a greedy scheduling heuristic, not a proof of optimality.
+
+Direct travel normally ascends to the configured safe height, translates in XY,
+and descends. Exact coincident endpoints require no approach motion. The
+planner reserves short swept XY regions over their motion intervals; safe
+parallel execution is permitted. Eligibility also conservatively checks other
+robots parked at home. The model uses TCP disks and base-to-TCP arm envelopes,
+not articulated joint-level robot motion planning. Configuration thresholds,
+deposition paths, and task directions are not optimized or relaxed.
+
+## Outputs and acceptance
+
+Each invocation creates a fresh `results/<UTC timestamp>/` directory. Each case
+contains:
+
+```text
+case_01/
+  input/config.yaml          Unmodified input copy
+  input/target.stl           Unmodified input copy
+  input/trajectory.csv      Newly generated trajectory
+  assignments.csv           Task allocation and timing
+  metrics.json              Four metrics and separate timing fields
+  validation.json           Full Validator status and makespan agreement
+  manifest.json             Input, code, and artifact SHA-256 hashes
+  report/                   Full Validator report
+```
+
+Only a full `PASS`, with matching scheduler and Validator makespan, publishes
+`trajectory/trajectory_01.csv`. Its bytes match `input/trajectory.csv` in the run
+record. A failure returns a nonzero exit code, retains diagnostic artifacts,
+and leaves a previously published CSV intact. Therefore, always check the
+current run's status before treating a published CSV as a new result.
+
+Re-running a case recomputes it from its inputs and replaces its published CSV
+only after success. There is no within-case resume; completed cases can be run
+individually. Outputs for other case numbers are not changed.
+
+The published CSV columns are:
+
+```text
+robot_id,time_s,x_mm,y_mm,z_mm,mode
+```
+
+Modes are `T` (travel), `D` (deposition), and `W` (wait/setup), describing the
+segment from the current waypoint to the next. To evaluate a submission,
+provide the original `config.yaml` and `target.stl` together with its published
+CSV renamed to `trajectory.csv`. A ready-to-use bundle already exists in each
+run's `input` directory:
+
+```powershell
+python -m waam_validator.cli ui ".\results\<timestamp>\case_04\input"
+```
+
+## Timing and metrics
+
+- Makespan includes travel, setup, deposition, waiting, and final home returns.
+- `computation_time_s` measures a fresh call to the scheduling function,
+  including route preparation, candidate collision checks, and in-memory
+  trajectory rendering. It includes small progress-print overhead.
+- STL task generation and final Validator execution are recorded separately as
+  `task_generation_time_s` and `validation_time_s`. They are excluded from
+  algorithm computation time. File export is also excluded.
+- Per-robot utilization is occupied job time divided by makespan; occupied time
+  includes approach travel, deposition, arc setup, and return travel. It is not
+  deposition-only utilization. Idle time is makespan minus occupied time.
+- `total_time_s` in the manifest measures the case pipeline through publication,
+  before the final manifest write. Wall-clock computation time depends on
+  hardware and concurrent system load.
+
+The scheduling, slicing, and collision kernels were extracted from the
+evaluated Min-Min implementation. Unrelated metaheuristics and benchmark result
+dependencies were removed; small synthetic regression tests check output
+equivalence and full Validator acceptance. Full benchmark outputs must be
+regenerated with the commands above before publication.
