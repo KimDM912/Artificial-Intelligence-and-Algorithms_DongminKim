@@ -1,0 +1,1 @@
+waam-validator @ git+https://github.com/Ha-An/WAAM_Validator.git@283b1beed324aaba717fe76bd06449e9001dac41
